@@ -70,6 +70,9 @@ export const parents: ParentsData<any> = new WeakMap<
  */
 export const nodes: NodesData<any> = new WeakMap<Node, NodeData<unknown>>();
 
+// https://developer.mozilla.org/en-US/docs/Web/API/HTML_Drag_and_Drop_API/Drag_operations#specifying_drop_targets
+// 想要drop，需要在dragover dragenter事件设置 preventDefault, 不然drop事件不会触发
+
 /**
  * Function to check if touch support is enabled.
  *
@@ -199,7 +202,7 @@ export function setDragState<T>(
 }
 
 /**
- *
+ *  点击在了非拖拽区域，进行cleanup 和按下escape一样效果
  */
 function handleRootPointerdown(_e: PointerEvent) {
   if (state.activeState) setActive(state.activeState.parent, undefined, state);
@@ -210,6 +213,8 @@ function handleRootPointerdown(_e: PointerEvent) {
   state.selectedState = state.activeState = undefined;
 }
 
+// note：合成事件 似乎是 指的将node拖拽到parent外部然后释放时候的效果
+// https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture
 function handleRootPointerup(e: PointerEvent) {
   pd(e);
 
@@ -218,7 +223,7 @@ function handleRootPointerup(e: PointerEvent) {
   state.pointerDown = undefined;
 
   if (!isSynthDragState(state)) return;
-
+  
   const config = state.currentParent.data.config;
 
   if (isSynthDragState(state)) config.handleEnd(state);
@@ -226,7 +231,7 @@ function handleRootPointerup(e: PointerEvent) {
 
 /**
  * Handles the keydown event on the root element.
- *
+ * notes: 按下escape后进行 cleanup
  * @param {KeyboardEvent} e - The keyboard event.
  */
 function handleRootKeydown(e: KeyboardEvent) {
@@ -314,6 +319,7 @@ export function dragAndDrop<T>({
   touchDevice = checkTouchSupport();
 
   if (!documentController) {
+    // note: 为啥要给document设置这个呢：用来做cleanup
     documentController = addEvents(document, {
       dragover: handleRootDragover,
       pointerdown: handleRootPointerdown,
@@ -414,10 +420,12 @@ export function dragAndDrop<T>({
     emit,
   };
 
+  // note: 监听parent ele变化
   const nodesObserver = new MutationObserver(nodesMutated);
 
   nodesObserver.observe(parent, { childList: true });
 
+  // note: weakMap方便gc
   parents.set(parent, parentData);
 
   config.plugins?.forEach((plugin) => {
@@ -555,6 +563,7 @@ function setActive<T>(
 ) {
   const activeDescendantClass = parent.data.config.activeDescendantClass;
 
+  // note: 先进行cleanup
   if (state.activeState) {
     {
       removeClass([state.activeState.node.el], activeDescendantClass);
@@ -588,7 +597,7 @@ function setActive<T>(
 /**
  * This function deselects the nodes. This will clean the prior selected state
  * as well as removing any classes or attributes set.
- *
+ * 移除class，并将node从selectedState.nodes中移除
  * @param {Array<NodeRecord<T>>} nodes - The nodes to deselect.
  * @param {ParentRecord<T>} parent - The parent record.
  * @param {BaseDragState<T>} state - The current drag state.
@@ -960,7 +969,7 @@ export function isSynthDragState<T>(
 
 /**
  * Setup the parent.
- *
+ * note: 挂载事件，并将abort放入abortControllers.mainParent 注入无障碍相关属性
  * @param parent - The parent element.
  * @param parentData - The parent data.
  *
@@ -977,7 +986,7 @@ function setup<T>(parent: HTMLElement, parentData: ParentData<T>): void {
       const parent = parents.get(e.target as HTMLElement);
 
       if (!parent) return;
-
+      // note: CustomEvent的detail对象只有在初始化此event时才生效
       parent.nestedParent = e.detail.parent;
     },
     focus: parentEventData(parentData.config.handleParentFocus),
@@ -1068,7 +1077,8 @@ export function setAttrs(el: HTMLElement, attrs: Record<string, string>) {
  */
 export function setupNode<T>(data: SetupNodeData<T>) {
   const config = data.parent.data.config;
-
+  // note: 设置draggable为true 才能触发dragstart事件
+  // note: 将事件挂载到node上（此处实现将事件从parent上复制到node上）
   data.node.data.abortControllers.mainNode = addEvents(data.node.el, {
     keydown: nodeEventData(config.handleNodeKeydown),
     dragstart: nodeEventData(config.handleDragstart),
@@ -1791,7 +1801,7 @@ export function validateDragHandle<T>({
   const dragHandles = node.el.querySelectorAll(config.dragHandle);
 
   if (!dragHandles) return false;
-
+  // note: elementFromPoint通过坐标获取dom
   const elFromPoint = config.root.elementFromPoint(x, y);
 
   if (!elFromPoint) return false;
@@ -2812,7 +2822,7 @@ export function transfer<T>(
 
 /**
  * Event listener used for all parents.
- *
+ * 用于注入parentData
  * @param callback - The callback.
  *
  * @returns A function to get the parent event data.
@@ -2881,7 +2891,7 @@ export function addNodeClass<T>(
 
 /**
  * Add class to the parent.
- *
+ * 目前只在insert这个plugin中使用
  * @param els - The parents.
  * @param className - The class name.
  * @param omitAppendPrivateClass - Whether to omit append private class.
@@ -2922,6 +2932,7 @@ export function addClass(
   el: Node | HTMLElement | Element,
   className: string | undefined,
   data: NodeData<any> | ParentData<any> | undefined,
+  // note: false时会把已经含有的class记录到data.privateClasses中
   omitAppendPrivateClass = false
 ) {
   if (!className) return;
@@ -3298,6 +3309,8 @@ export function addEvents(
 
     el.addEventListener(eventName, handler, {
       signal: abortController.signal,
+      // passive的含义：有些事件不需要执行preventDefault()，但是浏览器会判断有没有这个，阻塞listener的执行，如果设置为true 则不允许在里面调用preventDefault，浏览器明确知道不会调用这个，可以立即执行listener
+      // https://stackoverflow.com/questions/37721782/what-are-passive-event-listeners
       passive: false,
       capture: eventName === "focus" || eventName === "blur",
     });
